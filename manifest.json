@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "LLM Data Bridge",
+  "version": "6.0",
+  "description": "Manual clipboard pipeline for cross-LLM data transfers.",
+  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*", 
+        "https://gemini.google.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}

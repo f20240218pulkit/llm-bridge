@@ -1,0 +1,14 @@
+# Python bytecode & environments
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Environment variables & keys
+.env
+*.pem
+
+# Logs & OS metadata
+*.log
+.DS_Store
+Thumbs.db
