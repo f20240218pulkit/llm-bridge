@@ -1,133 +1,151 @@
 document.addEventListener('DOMContentLoaded', () => {
-    const scrapeBtn = document.getElementById('scrape-btn');
-    const clearBtn = document.getElementById('clear-btn');
-    const statusLabel = document.getElementById('status');
-    const matrixContainer = document.getElementById('chunk-matrix-container');
-    const gridWrapper = document.getElementById('grid-wrapper');
+  const scrapeBtn = document.getElementById('scrapeBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const statusEl = document.getElementById('status');
+  const statsBar = document.getElementById('statsBar');
+  const rawCharsEl = document.getElementById('rawChars');
+  const cleanCharsEl = document.getElementById('cleanChars');
+  const totalChunksEl = document.getElementById('totalChunks');
+  const chunkList = document.getElementById('chunkList');
 
-    // CONFIGURATION TARGET: Set this to 'http://127.0.0.1:8005/api/chat' for local 
-    // or 'http://YOUR_PUBLIC_IP:8005/api/chat' for OCI cloud.
-    const TARGET_ENDPOINT = 'http://127.0.0.1:8005/api/chat'; 
-    const LOCAL_CHUNK_SIZE = 3500; 
+  // Verify scrapeBtn exists before adding listener
+  if (!scrapeBtn) {
+    console.error("LLM Bridge Error: Could not find element with id='scrapeBtn' in popup.html");
+    return;
+  }
 
-    chrome.storage.local.get(['llmChunks', 'currentIndex', 'copiedIndices'], (res) => {
-        if (res.llmChunks && res.llmChunks.length > 0) {
-            renderMatrixGrid(res.llmChunks, res.currentIndex || 0, res.copiedIndices || []);
-        }
+  // Restore saved chunks across tab switches
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(['chunks', 'stats', 'status'], (res) => {
+      if (res.chunks && res.chunks.length > 0) {
+        renderChunks(res.chunks);
+        renderStats(res.stats);
+        if (statusEl) statusEl.textContent = res.status || 'Active session restored';
+        if (clearBtn) clearBtn.style.display = 'block';
+      }
     });
+  }
 
-    scrapeBtn.addEventListener('click', async () => {
-        statusLabel.innerText = "Targeting...";
-        statusLabel.style.color = "#f9e2af";
+  scrapeBtn.addEventListener('click', async () => {
+    if (statusEl) statusEl.textContent = 'Detecting active LLM platform...';
+    scrapeBtn.disabled = true;
 
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!activeTab) {
-            statusLabel.innerText = "No Active Tab";
-            return;
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+      // Multi-Platform DOM Scraper
+      const [{ result: pageText }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const url = window.location.href;
+
+          // 1. ChatGPT
+          if (url.includes('chatgpt.com') || url.includes('openai.com')) {
+            const msgs = Array.from(document.querySelectorAll('[data-message-author-role]'));
+            if (msgs.length > 0) {
+              return msgs.map(el => {
+                const role = el.getAttribute('data-message-author-role') || 'User';
+                return `### ${role.toUpperCase()}:\n${el.innerText}`;
+              }).join('\n\n---\n\n');
+            }
+          }
+
+          // 2. Claude
+          if (url.includes('claude.ai')) {
+            const msgs = Array.from(document.querySelectorAll('.font-claude-message, .font-user-message, [data-testid="user-message"], [data-is-streaming]'));
+            if (msgs.length > 0) {
+              return msgs.map(el => {
+                const isUser = el.matches('.font-user-message, [data-testid="user-message"]');
+                return `### ${isUser ? 'USER' : 'CLAUDE'}:\n${el.innerText}`;
+              }).join('\n\n---\n\n');
+            }
+          }
+
+          // 3. Gemini
+          if (url.includes('gemini.google.com')) {
+            const turns = Array.from(document.querySelectorAll('user-query, model-response, .query-content, .response-container-content'));
+            if (turns.length > 0) {
+              return turns.map(el => {
+                const isUser = el.tagName.toLowerCase().includes('user') || el.className.includes('query');
+                return `### ${isUser ? 'USER' : 'GEMINI'}:\n${el.innerText}`;
+              }).join('\n\n---\n\n');
+            }
+          }
+
+          // Fallback
+          const mainArea = document.querySelector('main') || document.querySelector('article');
+          return mainArea ? mainArea.innerText : document.body.innerText;
         }
+      });
 
-        chrome.tabs.sendMessage(activeTab.id, { action: "TRIGGER_SCRAPE" }, async (response) => {
-            if (!response || response.status === "failed") {
-                statusLabel.innerText = "No Text Found";
-                statusLabel.style.color = "#f38ba8";
-                return;
-            }
+      if (!pageText || !pageText.trim()) throw new Error('No readable chat context found.');
 
-            statusLabel.innerText = "Compressing...";
-            
-            let rawTextPool = response.data.trim();
-            let segments = [];
+      if (statusEl) statusEl.textContent = `Extracted ${pageText.length.toLocaleString()} chars. Cleaning with Gemini...`;
 
-            // Safe client-side breakdown loop
-            while (rawTextPool.length > 0) {
-                if (rawTextPool.length <= LOCAL_CHUNK_SIZE) {
-                    segments.push(rawTextPool);
-                    break;
-                }
-                let sliceZone = rawTextPool.substring(0, LOCAL_CHUNK_SIZE);
-                let splitIndex = sliceZone.lastIndexOf('\n');
-                if (splitIndex <= 0) {
-                    splitIndex = LOCAL_CHUNK_SIZE;
-                }
-                segments.push(rawTextPool.substring(0, splitIndex).trim());
-                rawTextPool = rawTextPool.substring(splitIndex).trim();
-            }
+      const res = await fetch('http://127.0.0.1:8005/api/chunk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: pageText, chunkSize: 3000 })
+      });
 
-            // Force a 5-second network abort timeout guard
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const data = await res.json();
 
-            try {
-                const apiCall = await fetch(TARGET_ENDPOINT, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ segments: segments }),
-                    signal: controller.signal
-                });
+      if (data.success) {
+        const stats = { raw: data.rawLength, clean: data.optimizedLength, total: data.totalChunks };
+        const statusMsg = `Ready! ${data.totalChunks} chunks optimized.`;
 
-                clearTimeout(timeoutId);
-                const data = await apiCall.json();
-                
-                if (data.chunks && data.chunks.length > 0) {
-                    chrome.storage.local.set({ 
-                        llmChunks: data.chunks, 
-                        currentIndex: 0,
-                        copiedIndices: [] 
-                    }, () => {
-                        statusLabel.innerText = "Ready";
-                        statusLabel.style.color = "#a6e3a1";
-                        renderMatrixGrid(data.chunks, 0, []);
-                    });
-                } else {
-                    statusLabel.innerText = "Empty Server Data";
-                    statusLabel.style.color = "#f38ba8";
-                }
-            } catch (err) {
-                clearTimeout(timeoutId);
-                if (err.name === 'AbortError') {
-                    statusLabel.innerText = "Timeout (5s)";
-                } else {
-                    statusLabel.innerText = "Net Conn Error";
-                }
-                statusLabel.style.color = "#f38ba8";
-                console.error("LLM Bridge Flight Error:", err);
-            }
-        });
-    });
+        chrome.storage.local.set({ chunks: data.chunks, stats: stats, status: statusMsg });
 
-    function renderMatrixGrid(chunks, nextIndex, copiedIndices) {
-        gridWrapper.innerHTML = "";
-        matrixContainer.style.display = "block";
-        chunks.forEach((chunk, idx) => {
-            const chip = document.createElement('div');
-            chip.className = 'chunk-chip';
-            chip.innerText = `Part ${idx + 1}`;
-            if (copiedIndices.includes(idx)) chip.classList.add('copied');
+        renderChunks(data.chunks);
+        renderStats(stats);
+        if (statusEl) statusEl.textContent = statusMsg;
+        if (clearBtn) clearBtn.style.display = 'block';
+      } else {
+        throw new Error('Flask server failed to process request.');
+      }
 
-            chip.addEventListener('click', () => {
-                navigator.clipboard.writeText(chunk).then(() => {
-                    if (!copiedIndices.includes(idx)) copiedIndices.push(idx);
-                    let targetNext = idx + 1;
-                    chrome.storage.local.set({ currentIndex: targetNext, copiedIndices: copiedIndices }, () => {
-                        renderMatrixGrid(chunks, targetNext, copiedIndices);
-                        chrome.tabs.sendMessage(activeTab.id, { 
-                            action: "CLIPBOARD_WRITE", 
-                            text: "", 
-                            info: `📋 Copied Part ${idx + 1} of ${chunks.length}` 
-                        });
-                    });
-                });
-            });
-            gridWrapper.appendChild(chip);
-        });
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `Error: ${err.message}`;
+    } finally {
+      scrapeBtn.disabled = false;
     }
+  });
 
+  if (clearBtn) {
     clearBtn.addEventListener('click', () => {
-        chrome.storage.local.clear(() => {
-            matrixContainer.style.display = "none";
-            gridWrapper.innerHTML = "";
-            statusLabel.innerText = "Cleared";
-            statusLabel.style.color = "#cdd6f4";
-        });
+      chrome.storage.local.clear();
+      if (chunkList) chunkList.innerHTML = '';
+      if (statsBar) statsBar.style.display = 'none';
+      clearBtn.style.display = 'none';
+      if (statusEl) statusEl.textContent = 'Ready to scrape chat';
     });
+  }
+
+  function renderStats(stats) {
+    if (!stats || !statsBar) return;
+    if (rawCharsEl) rawCharsEl.textContent = stats.raw.toLocaleString();
+    if (cleanCharsEl) cleanCharsEl.textContent = stats.clean.toLocaleString();
+    if (totalChunksEl) totalChunksEl.textContent = stats.total;
+    statsBar.style.display = 'flex';
+  }
+
+  function renderChunks(chunks) {
+    if (!chunkList) return;
+    chunkList.innerHTML = '';
+    chunks.forEach((c) => {
+      const btn = document.createElement('button');
+      btn.className = 'chunk-btn';
+      btn.textContent = `Copy Part ${c.part} of ${c.totalParts}`;
+      btn.onclick = () => {
+        navigator.clipboard.writeText(c.prompt);
+        btn.textContent = `✓ Part ${c.part} Copied!`;
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = `Copy Part ${c.part} of ${c.totalParts}`;
+          btn.classList.remove('copied');
+        }, 2000);
+      };
+      chunkList.appendChild(btn);
+    });
+  }
 });

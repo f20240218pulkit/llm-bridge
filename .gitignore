@@ -1,14 +1,12 @@
-# Python bytecode & environments
-__pycache__/
-*.pyc
-venv/
-.venv/
+# Node dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
 
-# Environment variables & keys
+# React build outputs
+frontend/dist/
+
+# System / Environment
 .env
-*.pem
-
-# Logs & OS metadata
-*.log
 .DS_Store
 Thumbs.db
